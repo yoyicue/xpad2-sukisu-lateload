@@ -3,6 +3,14 @@
 #include <linux/rculist.h>
 #include <linux/mutex.h>
 #include <linux/task_work.h>
+#include <linux/sched/task.h>
+
+#ifndef TWA_RESUME
+#define TWA_RESUME true
+#endif
+#ifndef fallthrough
+#define fallthrough do {} while (0)
+#endif
 #include <linux/capability.h>
 #include <linux/compiler.h>
 #include <linux/fs.h>

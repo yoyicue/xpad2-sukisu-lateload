@@ -1,10 +1,50 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use log::{info, warn};
 use std::fmt::Write as FmtWrite;
 use std::process::Command;
 
 use crate::module::{handle_updated_modules, prune_modules};
 use crate::{assets, defs, init_event, metamodule, restorecon, utils};
+
+const OFFICIAL_MANAGER_PACKAGE: &str = "com.sukisu.ultra";
+const OFFICIAL_MANAGER_CERT_SIZE: u32 = 0x035c;
+const OFFICIAL_MANAGER_CERT_SHA256: &str =
+    "947ae944f3de4ed4c21a7e4f7953ecf351bfa2b36239da37a34111ad29993eef";
+
+fn get_manager_appid(package_name: &str) -> Result<u32> {
+    ensure!(
+        package_name == OFFICIAL_MANAGER_PACKAGE,
+        "refusing to pin an untrusted Manager package: {package_name}"
+    );
+
+    let output = Command::new("/system/bin/pm")
+        .args(["path", package_name])
+        .output()
+        .context("query installed SukiSU Manager APK")?;
+    ensure!(
+        output.status.success(),
+        "PackageManager cannot resolve the installed SukiSU Manager"
+    );
+    let output = String::from_utf8(output.stdout).context("invalid PackageManager output")?;
+    let apk = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("package:"))
+        .find(|path| path.ends_with("/base.apk"))
+        .context("PackageManager returned no Manager base APK")?;
+    let (cert_size, cert_sha256) = crate::apk_sign::get_apk_signature(apk)
+        .with_context(|| format!("verify installed SukiSU Manager at {apk}"))?;
+    ensure!(
+        cert_size == OFFICIAL_MANAGER_CERT_SIZE && cert_sha256 == OFFICIAL_MANAGER_CERT_SHA256,
+        "installed SukiSU Manager signature is not trusted"
+    );
+
+    let uid = rustix::fs::stat(format!("/data/data/{package_name}"))
+        .with_context(|| format!("stat /data/data/{package_name}"))?
+        .st_uid as u32;
+    let appid = uid % 100_000;
+    ensure!(appid != 0, "invalid Manager appId derived from uid {uid}");
+    Ok(appid)
+}
 
 fn dump_process_info(label: &str) {
     use rustix::process::{getgid, getgroups, getpid, getuid};
@@ -64,11 +104,25 @@ pub fn run(
 
         // 4. Load kernelsu.ko from memory with manual relocation
         info!("Loading kernelsu.ko for KMI {kmi}...");
+        let manager_appid = match get_manager_appid(package_name) {
+            Ok(appid) => {
+                info!("Verified official SukiSU Manager appId {appid} for early pinning");
+                Some(appid)
+            }
+            Err(error) => {
+                warn!("Manager early pin unavailable; continuing without it: {error:#}");
+                None
+            }
+        };
         let mut params = if allow_shell {
             "allow_shell=1 ".to_string()
         } else {
             String::new()
         };
+
+        if let Some(appid) = manager_appid {
+            let _ = write!(params, "manager_appid={appid} ");
+        }
 
         if let Some(r) = spoof_release {
             let _ = write!(params, "spoof_release=\"{r}\" ");

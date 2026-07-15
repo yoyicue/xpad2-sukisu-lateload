@@ -62,7 +62,7 @@ pub fn ksuctl<T>(request: u32, arg: *mut T) -> std::io::Result<i32> {
 }
 
 // API implementations
-fn get_info() -> ksu_uapi::ksu_get_info_cmd {
+pub fn get_info() -> ksu_uapi::ksu_get_info_cmd {
     *INFO_CACHE.get_or_init(|| {
         let mut cmd = ksu_uapi::ksu_get_info_cmd {
             version: 0,
@@ -82,9 +82,29 @@ pub fn is_late_load() -> bool {
     get_info().flags & ksu_uapi::KSU_GET_INFO_FLAG_LATE_LOAD != 0
 }
 
+pub fn is_lkm() -> bool {
+    get_info().flags & ksu_uapi::KSU_GET_INFO_FLAG_LKM != 0
+}
+
+pub fn runtime_mode() -> &'static str {
+    if is_late_load() {
+        "late-load"
+    } else if is_lkm() {
+        "lkm"
+    } else {
+        "built-in"
+    }
+}
+
 pub fn grant_root() -> std::io::Result<()> {
     ksuctl(ksu_uapi::KSU_IOCTL_GRANT_ROOT, std::ptr::null_mut::<u8>())?;
     Ok(())
+}
+
+pub fn get_manager_appid() -> std::io::Result<u32> {
+    let mut cmd = ksu_uapi::ksu_get_manager_appid_cmd { appid: 0 };
+    ksuctl(ksu_uapi::KSU_IOCTL_GET_MANAGER_APPID, &raw mut cmd)?;
+    Ok(cmd.appid)
 }
 
 fn report_event(event: u32) {

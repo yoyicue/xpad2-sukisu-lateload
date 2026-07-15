@@ -63,10 +63,19 @@ void setup_groups(struct root_profile *profile, struct cred *cred)
     put_group_info(group_info);
 }
 
+#ifndef CONFIG_KSU_LEGACY_4_19
 void seccomp_filter_release(struct task_struct *tsk);
+#endif
 
 static void disable_seccomp(void)
 {
+#ifdef CONFIG_KSU_LEGACY_4_19
+    spin_lock_irq(&current->sighand->siglock);
+    clear_thread_flag(TIF_SECCOMP);
+    current->seccomp.mode = 0;
+    current->seccomp.filter = NULL;
+    spin_unlock_irq(&current->sighand->siglock);
+#else
     struct task_struct *fake;
 
     fake = kmalloc(sizeof(*fake), GFP_KERNEL);
@@ -89,7 +98,9 @@ static void disable_seccomp(void)
 
     current->seccomp.mode = 0;
     current->seccomp.filter = NULL;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
     atomic_set(&current->seccomp.filter_count, 0);
+#endif
     spin_unlock_irq(&current->sighand->siglock);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
@@ -102,6 +113,7 @@ static void disable_seccomp(void)
 
     seccomp_filter_release(fake);
     kfree(fake);
+#endif
 }
 
 int escape_with_root_profile(void)
@@ -187,7 +199,9 @@ int escape_with_root_profile(void)
         ksu_set_task_tracepoint_flag(t);
     }
 
+#ifndef CONFIG_KSU_LEGACY_4_19
     setup_mount_ns(profile->namespaces);
+#endif
     ksu_put_root_profile(profile);
     return 0;
 

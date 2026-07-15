@@ -232,6 +232,9 @@ enum Debug {
     /// Get kernel version
     Version,
 
+    /// Get kernel runtime information
+    Info,
+
     /// For testing
     Test,
 
@@ -812,6 +815,20 @@ pub fn run() -> Result<()> {
             }
             Debug::Version => {
                 println!("Kernel Version: {}", ksucalls::get_version());
+                Ok(())
+            }
+            Debug::Info => {
+                let info = ksucalls::get_info();
+                println!("version: {}", info.version);
+                println!("flags: 0x{:x}", info.flags);
+                println!("features: 0x{:x}", info.features);
+                println!("lkm: {}", ksucalls::is_lkm());
+                println!("late_load: {}", ksucalls::is_late_load());
+                println!("runtime_mode: {}", ksucalls::runtime_mode());
+                match ksucalls::get_manager_appid() {
+                    std::result::Result::Ok(appid) => println!("manager_appid: {appid}"),
+                    Err(error) => println!("manager_appid: unavailable ({error})"),
+                }
                 Ok(())
             }
             Debug::Su { global_mnt } => crate::su::grant_root(global_mnt),

@@ -5,11 +5,17 @@
 #include <linux/list.h>
 #include <linux/rwsem.h>
 
+#ifdef CONFIG_KSU_LEGACY_4_19
+static inline void ksu_kernel_umount_init(void) {}
+static inline void ksu_kernel_umount_exit(void) {}
+static inline int ksu_handle_umount(uid_t old_uid, uid_t new_uid) { return 0; }
+#else
 void ksu_kernel_umount_init(void);
 void ksu_kernel_umount_exit(void);
 
 // Handler function to be called from setresuid hook
 int ksu_handle_umount(uid_t old_uid, uid_t new_uid);
+#endif
 
 // for the umount list
 struct mount_entry {

@@ -4,6 +4,8 @@
 #include <linux/vmalloc.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
+#include <linux/sched/task.h>
+#include <linux/sched/signal.h>
 
 #include "uapi/supercall.h"
 #include "supercall/internal.h"
@@ -119,6 +121,9 @@ static int do_report_event(void __user *arg)
 
 static int do_set_sepolicy(void __user *arg)
 {
+#ifdef CONFIG_KSU_LEGACY_4_19
+    return -EOPNOTSUPP;
+#else
     struct ksu_set_sepolicy_cmd cmd;
 
     if (copy_from_user(&cmd, arg, sizeof(cmd))) {
@@ -126,6 +131,7 @@ static int do_set_sepolicy(void __user *arg)
     }
 
     return handle_sepolicy((void __user *)cmd.data, cmd.data_len);
+#endif
 }
 
 static int do_check_safemode(void __user *arg)
@@ -612,6 +618,9 @@ static int add_try_umount(void __user *arg)
 
 static int do_set_init_pgrp(void __user *arg)
 {
+#ifdef CONFIG_KSU_LEGACY_4_19
+    return -EOPNOTSUPP;
+#else
     int err;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
     struct pid *pids[PIDTYPE_MAX] = { 0 };
@@ -641,6 +650,7 @@ out:
 #endif
 
     return err;
+#endif
 }
 
 static int do_get_sulog_fd(void __user *arg)
@@ -792,7 +802,11 @@ static int do_get_full_version(void __user *arg)
 static int do_get_hook_type(void __user *arg)
 {
     struct ksu_hook_type_cmd cmd = { 0 };
+#ifdef CONFIG_KSU_LEGACY_4_19
+    const char *type = "Direct Syscall Table (4.19)";
+#else
     const char *type = "Tracepoint Syscall Redirect";
+#endif
 
     strscpy(cmd.hook_type, type, sizeof(cmd.hook_type));
 

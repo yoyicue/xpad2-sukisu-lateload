@@ -1,2 +1,3 @@
 **/*.ko
+!aarch64/xpad2-sukisu-4.19.191_kernelsu.ko
 **/ksuinit

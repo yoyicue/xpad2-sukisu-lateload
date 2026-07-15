@@ -4,8 +4,16 @@
 #include <linux/rwsem.h>
 #include <linux/utsname.h>
 
+#ifdef CONFIG_KSU_LEGACY_4_19
+static inline void ksu_spoof_version(const char *spoof_release, const char *spoof_version) {}
+static inline int ksu_set_spoof_version(const char *release, const char *version)
+{
+    return -EOPNOTSUPP;
+}
+#else
 void ksu_spoof_version(const char *spoof_release, const char *spoof_version);
 
 int ksu_set_spoof_version(const char *release, const char *version);
+#endif
 
 #endif

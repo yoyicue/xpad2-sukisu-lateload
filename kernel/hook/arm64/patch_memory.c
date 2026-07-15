@@ -10,9 +10,131 @@
 #include "linux/cpumask.h"
 #include "linux/gfp.h" // IWYU pragma: keep
 #include "linux/uaccess.h"
+#include "linux/version.h"
 #include "linux/stop_machine.h"
 #include "asm/cacheflush.h"
+#include "asm/insn.h"
 #include "asm-generic/fixmap.h"
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+#define copy_to_kernel_nofault probe_kernel_write
+#endif
+
+#ifdef CONFIG_KSU_LEGACY_4_19
+
+#include "infra/symbol_resolver.h"
+#include <asm/sysreg.h>
+
+static DEFINE_RAW_SPINLOCK(ksu_legacy_patch_lock);
+extern void **ksu_syscall_table;
+
+static unsigned long ksu_legacy_phys_from_ttbr1(unsigned long va)
+{
+    static const int shifts[] = { 30, 21, 12 };
+    u64 table = read_sysreg(ttbr1_el1) & GENMASK_ULL(47, 12);
+    int level;
+
+    for (level = 0; level < ARRAY_SIZE(shifts); level++) {
+        unsigned long entry_phys = table +
+            (((va >> shifts[level]) & 0x1ff) * sizeof(u64));
+        void *map;
+        u64 desc;
+
+        __set_fixmap(FIX_TEXT_POKE0, entry_phys,
+                     __pgprot(_PROT_DEFAULT | PTE_PXN | PTE_UXN |
+                              PTE_ATTRINDX(MT_NORMAL) | PTE_NG));
+        map = (void *)(fix_to_virt(FIX_TEXT_POKE0) +
+                       offset_in_page(entry_phys));
+        desc = READ_ONCE(*(u64 *)map);
+        __set_fixmap(FIX_TEXT_POKE0, 0, __pgprot(0));
+
+        if (!(desc & 1))
+            return 0;
+        if (level < ARRAY_SIZE(shifts) - 1 && !(desc & 2)) {
+            u64 mask = GENMASK_ULL(47, shifts[level]);
+            return (desc & mask) | (va & ~mask);
+        }
+        table = desc & GENMASK_ULL(47, 12);
+    }
+
+    return table | offset_in_page(va);
+}
+
+int ksu_patch_text(void *dst, void *src, size_t len, int flags)
+{
+    unsigned long kimage_voffset;
+    unsigned long phys;
+    unsigned long irq_flags;
+    void *waddr;
+    int ret;
+
+    if (!dst || !src || !len || len > PAGE_SIZE ||
+        offset_in_page(dst) + len > PAGE_SIZE)
+        return -EINVAL;
+
+    /*
+     * aarch64_insn_patch_text() in this 4.19 tree only recognises core
+     * kernel text. Passing a rodata address (such as sys_call_table) makes
+     * it take the module/vmalloc path and BUG_ON(vmalloc_to_page() == NULL).
+     * Map the kernel-image physical page through the text-poke fixmap.
+     */
+    {
+        unsigned long voffset_sym;
+
+        voffset_sym = find_kernel_symbol_exact("kimage_voffset");
+        if (voffset_sym &&
+            !probe_kernel_read(&kimage_voffset, (void *)voffset_sym,
+                               sizeof(kimage_voffset))) {
+            /* Use the runtime value. */
+        } else {
+            /* Exact XPad2 MT8797 /260 fallback. */
+            if (!ksu_syscall_table)
+                return -ENOENT;
+            kimage_voffset = (unsigned long)ksu_syscall_table -
+                             0x810516a0UL;
+        }
+    }
+
+    phys = ksu_legacy_phys_from_ttbr1((unsigned long)dst);
+    if (!phys)
+        phys = (unsigned long)dst - kimage_voffset;
+    if (!pfn_valid(PHYS_PFN(phys)))
+        return -EINVAL;
+
+    raw_spin_lock_irqsave(&ksu_legacy_patch_lock, irq_flags);
+    /* Avoid PAGE_KERNEL/PTE_MAYBE_NG: its capability test imports hidden
+     * ARM64 static-key data on this vendor build. */
+    __set_fixmap(FIX_TEXT_POKE0, phys,
+                 __pgprot(_PROT_DEFAULT | PTE_PXN | PTE_UXN | PTE_WRITE |
+                          PTE_ATTRINDX(MT_NORMAL) | PTE_NG));
+    waddr = (void *)(fix_to_virt(FIX_TEXT_POKE0) + offset_in_page(phys));
+    ret = probe_kernel_write(waddr, src, len);
+    if (!ret) {
+        __flush_dcache_area(waddr, len);
+        dsb(ish);
+        __inval_dcache_area(dst, len);
+        dsb(ish);
+    }
+    __set_fixmap(FIX_TEXT_POKE0, 0, __pgprot(0));
+    raw_spin_unlock_irqrestore(&ksu_legacy_patch_lock, irq_flags);
+
+    if (ret)
+        pr_err("legacy fixmap patch failed: dst=%pK phys=%lx len=%zu ret=%d\n",
+               dst, phys, len, ret);
+    else if (len == sizeof(unsigned long)) {
+        unsigned long got = READ_ONCE(*(unsigned long *)dst);
+        unsigned long want;
+
+        memcpy(&want, src, sizeof(want));
+        pr_info("legacy fixmap readback: phys=%lx want=%lx got=%lx ok=%d\n",
+                phys, want, got, want == got);
+        if (want != got)
+            ret = -EIO;
+    }
+    return ret;
+}
+
+#else
 
 // https://github.com/fuqiuluo/ovo/blob/f7da411458e87d32438dc14fce5a3313ed0c967e/ovo/mmuhack.c#L21
 
@@ -198,5 +320,7 @@ int ksu_patch_text(void *dst, void *src, size_t len, int flags)
 
     return stop_machine(ksu_patch_text_cb, &info, cpu_online_mask);
 }
+
+#endif /* CONFIG_KSU_LEGACY_4_19 */
 
 #endif /* __aarch64__ */

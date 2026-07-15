@@ -2,7 +2,12 @@
 #include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/mm.h>
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
 #include <linux/pgtable.h>
+#else
+#include <asm/pgtable.h>
+#endif
 #include <linux/uaccess.h>
 #include <asm/current.h>
 #include <linux/cred.h>
@@ -11,6 +16,10 @@
 #include <linux/version.h>
 #include <linux/sched/task_stack.h>
 #include <linux/ptrace.h>
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+#define strncpy_from_user_nofault strncpy_from_user
+#endif
 
 #include "arch.h"
 #include "policy/allowlist.h"
@@ -157,7 +166,7 @@ long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, 
         goto do_orig_execve;
     }
 
-    ret = ksu_syscall_table[orig_nr](regs);
+    ret = ksu_get_original_syscall(orig_nr)(regs);
     if (ret < 0) {
         pr_err("failed to execve ksud as su: %ld, fallback to sh\n", ret);
         ksu_sulog_emit_pending(pending_sucompat, ret, GFP_KERNEL);
@@ -168,7 +177,7 @@ long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, 
     }
 
 do_orig_execve:
-    return ksu_syscall_table[orig_nr](regs);
+    return ksu_get_original_syscall(orig_nr)(regs);
 }
 
 // sucompat: permitted process can execute 'su' to gain root access.

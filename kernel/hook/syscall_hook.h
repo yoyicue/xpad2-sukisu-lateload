@@ -7,6 +7,7 @@ typedef sys_call_ptr_t syscall_fn_t;
 #endif
 
 extern syscall_fn_t *ksu_syscall_table;
+syscall_fn_t ksu_get_original_syscall(int nr);
 
 // Dispatcher slot number in syscall table
 extern int ksu_dispatcher_nr;
@@ -31,6 +32,7 @@ void ksu_unregister_syscall_hook(int nr);
 
 // Check if a handler is registered in the dispatcher for syscall @nr.
 bool ksu_has_syscall_hook(int nr);
+void ksu_syscall_hook_begin_exit(void);
 
 // --- Direct syscall table patching API (hook/unhook) ---
 // Directly overwrite syscall_table[@nr] with @fn using fixmap + stop_machine.

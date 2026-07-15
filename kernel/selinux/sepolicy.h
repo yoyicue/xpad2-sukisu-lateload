@@ -5,9 +5,11 @@
 
 #include "ss/policydb.h"
 
+#ifndef CONFIG_KSU_LEGACY_4_19
 struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol);
 
 void ksu_destroy_sepolicy(struct selinux_policy *orig);
+#endif
 
 // Operation on types
 bool ksu_type(struct policydb *db, const char *name, const char *attr);

@@ -148,6 +148,11 @@ static bool is_redundant_avtab_node(struct avtab_node *node)
 
 static bool remove_avtab_node(struct policydb *db, struct avtab_node *node)
 {
+#ifdef CONFIG_KSU_LEGACY_4_19
+    /* 4.19 stores avtab buckets in a flex_array. The late-load base policy
+     * only adds allow rules, so it never needs to prune a node. */
+    return false;
+#else
     int i;
     int ret;
     int shrink_size = sizeof(struct avtab_key) + sizeof(struct avtab_datum);
@@ -188,6 +193,7 @@ static bool remove_avtab_node(struct policydb *db, struct avtab_node *node)
 
     avtab_destroy(&removed);
     return false;
+#endif
 }
 
 static bool add_rule(struct policydb *db, const char *s, const char *t, const char *c, const char *p, int effect,
@@ -564,6 +570,55 @@ static bool add_filename_trans(struct policydb *db, const char *s, const char *t
         return false;
     }
 
+#ifdef CONFIG_KSU_LEGACY_4_19
+    struct filename_trans key;
+    struct filename_trans_datum *trans;
+
+    key.ttype = tgt->value;
+    key.tclass = cls->value;
+    key.name = (char *)o;
+
+    trans = hashtab_search(db->filename_trans, &key);
+    if (trans == NULL) {
+        struct filename_trans *new_key;
+
+        trans = kcalloc(1, sizeof(*trans), GFP_ATOMIC);
+        if (!trans) {
+            pr_err("add_filename_trans: failed to allocate datum\n");
+            return false;
+        }
+
+        new_key = kmalloc(sizeof(*new_key), GFP_ATOMIC);
+        if (!new_key) {
+            kfree(trans);
+            pr_err("add_filename_trans: failed to allocate key\n");
+            return false;
+        }
+
+        *new_key = key;
+        new_key->name = kstrdup(key.name, GFP_ATOMIC);
+        if (!new_key->name) {
+            kfree(new_key);
+            kfree(trans);
+            pr_err("add_filename_trans: failed to allocate name\n");
+            return false;
+        }
+
+        trans->otype = def->value;
+        if (hashtab_insert(db->filename_trans, new_key, trans)) {
+            kfree(new_key->name);
+            kfree(new_key);
+            kfree(trans);
+            pr_err("add_filename_trans: failed to insert rule\n");
+            return false;
+        }
+    } else {
+        trans->otype = def->value;
+    }
+
+    return ebitmap_set_bit(&db->filename_trans_ttypes,
+                           src->value - 1, 1) == 0;
+#else
     struct filename_trans_key key;
     key.ttype = tgt->value;
     key.tclass = cls->value;
@@ -596,6 +651,7 @@ static bool add_filename_trans(struct policydb *db, const char *s, const char *t
 
     db->compat_filename_trans_count++;
     return ebitmap_set_bit(&trans->stypes, src->value - 1, 1) == 0;
+#endif
 }
 
 static bool add_genfscon(struct policydb *db, const char *fs_name, const char *path, const char *context)
@@ -658,6 +714,101 @@ static bool add_type(struct policydb *db, const char *type_name, bool attr)
         return false;
     }
 
+#ifdef CONFIG_KSU_LEGACY_4_19
+    struct flex_array *new_type_attr_map_array;
+    struct flex_array *new_type_val_to_struct;
+    struct flex_array *new_val_to_name_types;
+    struct flex_array *old_fa;
+    void *old_elem;
+    int i;
+
+    new_type_attr_map_array =
+        flex_array_alloc(sizeof(struct ebitmap), value,
+                         GFP_ATOMIC | __GFP_ZERO);
+    new_type_val_to_struct =
+        flex_array_alloc(sizeof(struct type_datum *), value,
+                         GFP_ATOMIC | __GFP_ZERO);
+    new_val_to_name_types =
+        flex_array_alloc(sizeof(char *), value, GFP_ATOMIC | __GFP_ZERO);
+
+    if (!new_type_attr_map_array || !new_type_val_to_struct ||
+        !new_val_to_name_types) {
+        pr_err("add_type: failed to allocate legacy type indexes\n");
+        goto legacy_alloc_fail;
+    }
+
+    if (flex_array_prealloc(new_type_attr_map_array, 0, value,
+                            GFP_ATOMIC | __GFP_ZERO) ||
+        flex_array_prealloc(new_type_val_to_struct, 0, value,
+                            GFP_ATOMIC | __GFP_ZERO) ||
+        flex_array_prealloc(new_val_to_name_types, 0, value,
+                            GFP_ATOMIC | __GFP_ZERO)) {
+        pr_err("add_type: failed to preallocate legacy type indexes\n");
+        goto legacy_alloc_fail;
+    }
+
+    for (i = 0; i < db->type_attr_map_array->total_nr_elements; i++) {
+        old_elem = flex_array_get(db->type_attr_map_array, i);
+        if (old_elem &&
+            flex_array_put(new_type_attr_map_array, i, old_elem,
+                           GFP_ATOMIC | __GFP_ZERO))
+            goto legacy_copy_fail;
+    }
+    for (i = 0; i < db->type_val_to_struct_array->total_nr_elements; i++) {
+        old_elem = flex_array_get_ptr(db->type_val_to_struct_array, i);
+        if (old_elem &&
+            flex_array_put_ptr(new_type_val_to_struct, i, old_elem,
+                               GFP_ATOMIC | __GFP_ZERO))
+            goto legacy_copy_fail;
+    }
+    for (i = 0; i < value - 1; i++) {
+        old_elem = flex_array_get_ptr(db->sym_val_to_name[SYM_TYPES], i);
+        if (old_elem &&
+            flex_array_put_ptr(new_val_to_name_types, i, old_elem,
+                               GFP_ATOMIC | __GFP_ZERO))
+            goto legacy_copy_fail;
+    }
+
+    old_fa = db->type_attr_map_array;
+    db->type_attr_map_array = new_type_attr_map_array;
+    flex_array_free(old_fa);
+    ebitmap_init(flex_array_get(db->type_attr_map_array, value - 1));
+    if (ebitmap_set_bit(flex_array_get(db->type_attr_map_array,
+                                      value - 1),
+                        value - 1, 1))
+        return false;
+
+    old_fa = db->type_val_to_struct_array;
+    db->type_val_to_struct_array = new_type_val_to_struct;
+    flex_array_free(old_fa);
+    if (flex_array_put_ptr(db->type_val_to_struct_array, value - 1, type,
+                           GFP_ATOMIC | __GFP_ZERO))
+        return false;
+
+    old_fa = db->sym_val_to_name[SYM_TYPES];
+    db->sym_val_to_name[SYM_TYPES] = new_val_to_name_types;
+    flex_array_free(old_fa);
+    if (flex_array_put_ptr(db->sym_val_to_name[SYM_TYPES], value - 1, key,
+                           GFP_ATOMIC | __GFP_ZERO))
+        return false;
+
+    for (i = 0; i < db->p_roles.nprim; ++i)
+        ebitmap_set_bit(&db->role_val_to_struct[i]->types,
+                        value - 1, 1);
+
+    return true;
+
+legacy_copy_fail:
+    pr_err("add_type: failed to copy legacy type indexes\n");
+legacy_alloc_fail:
+    if (new_type_attr_map_array)
+        flex_array_free(new_type_attr_map_array);
+    if (new_type_val_to_struct)
+        flex_array_free(new_type_val_to_struct);
+    if (new_val_to_name_types)
+        flex_array_free(new_val_to_name_types);
+    return false;
+#else
     struct ebitmap *new_type_attr_map_array =
         ksu_kvrealloc(db->type_attr_map_array, value * sizeof(struct ebitmap), (value - 1) * sizeof(struct ebitmap));
 
@@ -697,6 +848,7 @@ static bool add_type(struct policydb *db, const char *type_name, bool attr)
     }
 
     return true;
+#endif
 }
 
 static bool set_type_state(struct policydb *db, const char *type_name, bool permissive)
@@ -726,7 +878,12 @@ static bool set_type_state(struct policydb *db, const char *type_name, bool perm
 
 static void add_typeattribute_raw(struct policydb *db, struct type_datum *type, struct type_datum *attr)
 {
+#ifdef CONFIG_KSU_LEGACY_4_19
+    struct ebitmap *sattr =
+        flex_array_get(db->type_attr_map_array, type->value - 1);
+#else
     struct ebitmap *sattr = &db->type_attr_map_array[type->value - 1];
+#endif
     ebitmap_set_bit(sattr, attr->value - 1, 1);
 
     struct hashtab_node *node;
@@ -867,6 +1024,7 @@ bool ksu_genfscon(struct policydb *db, const char *fs_name, const char *path, co
 
 // ======== sepolicy ========
 
+#ifndef CONFIG_KSU_LEGACY_4_19
 void ksu_destroy_sepolicy(struct selinux_policy *pol)
 {
     policydb_destroy(&pol->policydb);
@@ -946,3 +1104,4 @@ out_free_data:
 
     return ERR_PTR(ret);
 }
+#endif

@@ -2,14 +2,22 @@
 #include <linux/compat.h>
 #include <linux/cred.h>
 #include <linux/gfp.h>
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #include <linux/minmax.h>
+#else
+#include <linux/kernel.h>
+#endif
 #include <linux/overflow.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
 
-#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+#define strncpy_from_user_nofault strncpy_from_user
+#endif
+
 #if defined(__x86_64__) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
 #include <linux/mm.h>
 #endif
@@ -75,14 +83,14 @@ static const char __user *ksu_sulog_get_user_arg_ptr(struct user_arg_ptr argv, i
     if (unlikely(argv.is_compat)) {
         compat_uptr_t compat;
 
-        if (get_user(compat, argv.ptr.compat + nr))
+        if (copy_from_user(&compat, argv.ptr.compat + nr, sizeof(compat)))
             return ERR_PTR(-EFAULT);
 
         return compat_ptr(compat);
     }
 #endif
 
-    if (get_user(native, argv.ptr.native + nr))
+    if (copy_from_user(&native, argv.ptr.native + nr, sizeof(native)))
         return ERR_PTR(-EFAULT);
 
     return native;
@@ -93,9 +101,15 @@ static void ksu_sulog_fill_task_info(struct ksu_sulog_event *event, __u16 event_
     event->version = KSU_SULOG_EVENT_VERSION;
     event->event_type = event_type;
     event->retval = retval;
+#ifdef CONFIG_KSU_LEGACY_4_19
+    event->pid = current->pid;
+    event->tgid = current->tgid;
+    event->ppid = current->real_parent ? current->real_parent->pid : 0;
+#else
     event->pid = task_pid_nr(current);
     event->tgid = task_tgid_nr(current);
     event->ppid = task_ppid_nr(current);
+#endif
     event->uid = current_uid().val;
     event->euid = current_euid().val;
     get_task_comm(event->comm, current);

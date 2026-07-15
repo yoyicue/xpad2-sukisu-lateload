@@ -1,6 +1,7 @@
 #include <linux/err.h>
 #include <linux/fs.h>
 #include <linux/list.h>
+#include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
@@ -13,6 +14,36 @@
 #include "manager/throne_tracker.h"
 
 uid_t ksu_manager_appid = KSU_INVALID_APPID;
+
+#if defined(MODULE) && !defined(CONFIG_KSU_DISABLE_MANAGER)
+static unsigned int ksu_boot_manager_appid;
+
+static int set_boot_manager_appid(const char *value,
+                                  const struct kernel_param *parameter)
+{
+    unsigned int appid;
+    int ret = kstrtouint(value, 0, &appid);
+
+    if (ret)
+        return ret;
+    if (appid == 0 || appid >= KSU_PER_USER_RANGE)
+        return -EINVAL;
+
+    *(unsigned int *)parameter->arg = appid;
+    ksu_set_manager_appid(appid);
+    pr_info("manager appid pinned by module loader: %u\n", appid);
+    return 0;
+}
+
+static const struct kernel_param_ops manager_appid_ops = {
+    .set = set_boot_manager_appid,
+};
+
+/* The trusted late-load caller pins the verified Manager before zygote
+ * starts it. Mode 0 prevents mutation through sysfs after insertion. */
+module_param_cb(manager_appid, &manager_appid_ops,
+                &ksu_boot_manager_appid, 0);
+#endif
 
 #define SYSTEM_PACKAGES_LIST_PATH "/data/system/packages.list"
 
@@ -294,7 +325,7 @@ void track_throne(bool prune_only)
             break;
         }
         data->uid = res;
-        strncpy(data->package, package, KSU_MAX_PACKAGE_NAME);
+        strscpy(data->package, package, sizeof(data->package));
         list_add_tail(&data->list, &uid_list);
         // reset line start
         line_start = pos;

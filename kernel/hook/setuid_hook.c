@@ -16,7 +16,9 @@
 #include "hook/setuid_hook.h"
 #include "klog.h" // IWYU pragma: keep
 #include "manager/manager_identity.h"
+#ifndef CONFIG_KSU_LEGACY_4_19
 #include "infra/seccomp_cache.h"
+#endif
 #include "supercall/supercall.h"
 #include "hook/tp_marker.h"
 #include "feature/kernel_umount.h"
@@ -28,10 +30,14 @@ int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid)
     pr_info("handle_setresuid from %d to %d\n", old_uid, new_uid);
 
     if (unlikely(is_uid_manager(new_uid))) {
+#ifndef CONFIG_KSU_LEGACY_4_19
         spin_lock_irq(&current->sighand->siglock);
         ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
         ksu_set_task_tracepoint_flag(current);
         spin_unlock_irq(&current->sighand->siglock);
+#else
+        ksu_set_task_tracepoint_flag(current);
+#endif
 
         pr_info("install fd for manager: %d\n", new_uid);
         ksu_install_fd();
@@ -39,11 +45,13 @@ int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid)
     }
 
     if (ksu_is_allow_uid_for_current(new_uid)) {
+#ifndef CONFIG_KSU_LEGACY_4_19
         if (current->seccomp.mode == SECCOMP_MODE_FILTER && current->seccomp.filter) {
             spin_lock_irq(&current->sighand->siglock);
             ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
             spin_unlock_irq(&current->sighand->siglock);
         }
+#endif
         ksu_set_task_tracepoint_flag(current);
     } else {
         ksu_clear_task_tracepoint_flag_if_needed(current);

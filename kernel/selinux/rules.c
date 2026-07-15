@@ -4,8 +4,11 @@
 #include <linux/types.h>
 #include <linux/version.h>
 #include <linux/lockdep.h>
+#include <linux/err.h>
+#include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/vmalloc.h>
 
 #include "uapi/selinux.h"
 #include "klog.h" // IWYU pragma: keep
@@ -26,10 +29,70 @@ extern int avc_ss_reset(u32 seqno);
 #else
 extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);
 #endif
-// reset avc cache table, otherwise the new rules will not take effect if already denied
-static void reset_avc_cache()
+
+#ifdef CONFIG_KSU_LEGACY_4_19
+static struct policydb *clone_legacy_policydb(struct selinux_state *state)
 {
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))
+    static const size_t config_offset = 20;
+    struct policydb *db;
+    struct policy_file fp;
+    void *data = NULL;
+    size_t len = 0;
+    int ret;
+
+    ret = security_read_policy(state, &data, &len);
+    if (ret) {
+        pr_err("legacy SELinux: cannot read active policy: %d\n", ret);
+        vfree(data);
+        return ERR_PTR(ret);
+    }
+
+    if (len >= config_offset + sizeof(u32)) {
+        u32 *config = data + config_offset;
+        struct policydb *active = &state->ss->policydb;
+
+        if (READ_ONCE(active->android_netlink_route))
+            *config |= POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE;
+        if (READ_ONCE(active->android_netlink_getneigh))
+            *config |= POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH;
+    }
+
+    db = kzalloc(sizeof(*db), GFP_KERNEL);
+    if (!db) {
+        ret = -ENOMEM;
+        goto out_free_data;
+    }
+
+    fp.data = data;
+    fp.len = len;
+    ret = policydb_read(db, &fp);
+    if (ret) {
+        pr_err("legacy SELinux: cannot clone policydb: %d\n", ret);
+        kfree(db);
+        db = ERR_PTR(ret);
+        goto out_free_data;
+    }
+    db->len = len;
+
+out_free_data:
+    vfree(data);
+    return ret ? ERR_PTR(ret) : db;
+}
+#endif
+
+// reset avc cache table, otherwise the new rules will not take effect if already denied
+static void reset_avc_cache(u32 seqno)
+{
+#ifdef CONFIG_KSU_LEGACY_4_19
+    struct selinux_state *state = ksu_get_selinux_state();
+
+    if (!state)
+        return;
+
+    avc_ss_reset(state->avc, seqno);
+    selnl_notify_policyload(seqno);
+    selinux_status_update_policyload(state, seqno);
+#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))
     avc_ss_reset(0);
     selnl_notify_policyload(0);
     selinux_status_update_policyload(0);
@@ -39,18 +102,44 @@ static void reset_avc_cache()
     selnl_notify_policyload(0);
     selinux_status_update_policyload(&selinux_state, 0);
 #endif
+#ifndef CONFIG_KSU_LEGACY_4_19
     selinux_xfrm_notify_policyload();
+#endif
 }
 
 void apply_kernelsu_rules()
 {
-    struct selinux_policy *pol, *old_pol = selinux_state.policy;
     struct policydb *db;
+#ifdef CONFIG_KSU_LEGACY_4_19
+    struct policydb *old_db;
+    struct selinux_state *state;
+    struct selinux_ss *ss;
+    u32 seqno;
+#else
+    struct selinux_policy *pol, *old_pol = selinux_state.policy;
+#endif
 
     if (!getenforce()) {
         pr_info("SELinux permissive or disabled, apply rules!\n");
     }
 
+#ifdef CONFIG_KSU_LEGACY_4_19
+    state = ksu_get_selinux_state();
+    if (!state) {
+        pr_err("legacy SELinux: active state is unavailable\n");
+        return;
+    }
+
+    ss = READ_ONCE(state->ss);
+    if (!ss) {
+        pr_err("legacy SELinux: security server is unavailable\n");
+        return;
+    }
+
+    db = clone_legacy_policydb(state);
+    if (IS_ERR(db))
+        return;
+#else
     mutex_lock(&selinux_state.policy_mutex);
     backup_sepolicy =
         ksu_dup_sepolicy(rcu_dereference_protected(old_pol, lockdep_is_held(&selinux_state.policy_mutex)));
@@ -82,15 +171,31 @@ void apply_kernelsu_rules()
     }
 
     db = &pol->policydb;
+#endif
 
+#ifdef CONFIG_KSU_LEGACY_4_19
+    if (!ksu_type(db, KERNEL_SU_DOMAIN, "domain") ||
+        !ksu_permissive(db, KERNEL_SU_DOMAIN)) {
+        pr_err("legacy SELinux: cannot create the KernelSU domain\n");
+        goto legacy_rules_failed;
+    }
+#else
     ksu_type(db, KERNEL_SU_DOMAIN, "domain");
     ksu_permissive(db, KERNEL_SU_DOMAIN);
+#endif
     ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject");
     ksu_typeattribute(db, KERNEL_SU_DOMAIN, "netdomain");
     ksu_typeattribute(db, KERNEL_SU_DOMAIN, "bluetoothdomain");
 
     // Create unconstrained file type
+#ifdef CONFIG_KSU_LEGACY_4_19
+    if (!ksu_type(db, KERNEL_SU_FILE, "file_type")) {
+        pr_err("legacy SELinux: cannot create the KernelSU file type\n");
+        goto legacy_rules_failed;
+    }
+#else
     ksu_type(db, KERNEL_SU_FILE, "file_type");
+#endif
     ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject");
     ksu_allow(db, "domain", KERNEL_SU_FILE, ALL, ALL);
 
@@ -135,6 +240,12 @@ void apply_kernelsu_rules()
     ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getopt");
     ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getattr");
 
+    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "execute");
+    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "getattr");
+    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "map");
+    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "read");
+    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "write");
+
     // bootctl
     ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "dir", "search");
     ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "read");
@@ -148,15 +259,44 @@ void apply_kernelsu_rules()
     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
 
+#ifdef CONFIG_KSU_LEGACY_4_19
+    db->len += PAGE_SIZE;
+    old_db = kmalloc(sizeof(*old_db), GFP_KERNEL);
+    if (!old_db) {
+        pr_err("legacy SELinux: cannot allocate old policy holder\n");
+        policydb_destroy(db);
+        kfree(db);
+        return;
+    }
+
+    write_lock_irq(&ss->policy_rwlock);
+    memcpy(old_db, &ss->policydb, sizeof(*old_db));
+    memcpy(&ss->policydb, db, sizeof(*db));
+    seqno = ++ss->latest_granting;
+    write_unlock_irq(&ss->policy_rwlock);
+
+    kfree(db);
+    policydb_destroy(old_db);
+    kfree(old_db);
+    reset_avc_cache(seqno);
+    pr_info("legacy SELinux: KernelSU policy applied in place\n");
+    return;
+
+legacy_rules_failed:
+    policydb_destroy(db);
+    kfree(db);
+#else
     rcu_assign_pointer(selinux_state.policy, pol);
     synchronize_rcu();
     ksu_destroy_sepolicy(old_pol);
 
-    reset_avc_cache();
+    reset_avc_cache(0);
 out_unlock:
     mutex_unlock(&selinux_state.policy_mutex);
+#endif
 }
 
+#ifndef CONFIG_KSU_LEGACY_4_19
 #define KSU_SEPOLICY_MAX_BATCH_SIZE (8U * 1024U * 1024U)
 #define KSU_SEPOLICY_MAX_ARGS 5
 
@@ -511,7 +651,7 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
     synchronize_rcu();
     ksu_destroy_sepolicy(old_pol);
 
-    reset_avc_cache();
+    reset_avc_cache(0);
     ret = success_cmd_count;
     goto out_unlock;
 
@@ -524,3 +664,4 @@ out_free:
 
     return ret;
 }
+#endif

@@ -91,7 +91,7 @@ static struct kretprobe *syscall_regfunc_rp = NULL;
 static struct kretprobe *syscall_unregfunc_rp = NULL;
 #endif
 
-#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+#if defined(CONFIG_HAVE_SYSCALL_TRACEPOINTS) && !defined(CONFIG_KSU_LEGACY_4_19)
 // sys_enter handler: redirect hooked syscalls to the dispatcher
 static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 {
@@ -123,7 +123,9 @@ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 
 void __init ksu_syscall_hook_manager_init(void)
 {
+#if defined(CONFIG_HAVE_SYSCALL_TRACEPOINTS) && !defined(CONFIG_KSU_LEGACY_4_19)
     int ret;
+#endif
     pr_info("hook_manager: ksu_hook_manager_init called\n");
 
 #ifdef CONFIG_KRETPROBES
@@ -137,7 +139,7 @@ void __init ksu_syscall_hook_manager_init(void)
     ksu_register_syscall_hook(__NR_newfstatat, ksu_hook_newfstatat);
     ksu_register_syscall_hook(__NR_faccessat, ksu_hook_faccessat);
 
-#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+#if defined(CONFIG_HAVE_SYSCALL_TRACEPOINTS) && !defined(CONFIG_KSU_LEGACY_4_19)
     ret = register_trace_sys_enter(ksu_sys_enter_handler, NULL);
 #ifndef CONFIG_KRETPROBES
     ksu_mark_running_process_locked();
@@ -156,7 +158,8 @@ void __init ksu_syscall_hook_manager_init(void)
 void __exit ksu_syscall_hook_manager_exit(void)
 {
     pr_info("hook_manager: ksu_hook_manager_exit called\n");
-#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+    ksu_syscall_hook_begin_exit();
+#if defined(CONFIG_HAVE_SYSCALL_TRACEPOINTS) && !defined(CONFIG_KSU_LEGACY_4_19)
     unregister_trace_sys_enter(ksu_sys_enter_handler, NULL);
     tracepoint_synchronize_unregister();
     pr_info("hook_manager: sys_enter tracepoint unregistered\n");

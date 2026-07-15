@@ -4,10 +4,13 @@
 
 #include <linux/kallsyms.h>
 #include <linux/mutex.h>
+#include <linux/wait.h>
 #include <asm/cacheflush.h>
 #include "infra/symbol_resolver.h"
 #include "../patch_memory.h"
+#include "../syscall_event_bridge.h"
 #include "arch.h"
+#include "supercall/supercall.h"
 #include "klog.h" // IWYU pragma: keep
 
 syscall_fn_t *ksu_syscall_table = NULL;
@@ -27,6 +30,162 @@ struct syscall_hook_entry {
 static DEFINE_MUTEX(hooked_entries_lock);
 static struct syscall_hook_entry hooked_entries[16];
 static int hooked_count = 0;
+
+#ifdef CONFIG_KSU_LEGACY_4_19
+static atomic_t ksu_legacy_active = ATOMIC_INIT(0);
+static DECLARE_WAIT_QUEUE_HEAD(ksu_legacy_drain_wait);
+static bool ksu_legacy_exiting;
+
+void ksu_syscall_hook_begin_exit(void)
+{
+    WRITE_ONCE(ksu_legacy_exiting, true);
+    smp_mb();
+}
+
+static long ksu_legacy_dispatch(int nr, ksu_syscall_hook_fn fn, const struct pt_regs *regs)
+{
+    syscall_fn_t orig;
+    long ret;
+
+    atomic_inc(&ksu_legacy_active);
+    smp_mb__after_atomic();
+    orig = ksu_get_original_syscall(nr);
+    if (unlikely(READ_ONCE(ksu_legacy_exiting)))
+        ret = orig(regs);
+    else
+        ret = fn(nr, regs);
+    if (atomic_dec_and_test(&ksu_legacy_active))
+        wake_up_all(&ksu_legacy_drain_wait);
+    return ret;
+}
+#else
+void ksu_syscall_hook_begin_exit(void)
+{
+}
+#endif
+
+syscall_fn_t ksu_get_original_syscall(int nr)
+{
+    int i;
+
+    if (!ksu_syscall_table || nr < 0 || nr >= __NR_syscalls)
+        return NULL;
+    for (i = 0; i < READ_ONCE(hooked_count); i++) {
+        if (READ_ONCE(hooked_entries[i].nr) == nr)
+            return READ_ONCE(hooked_entries[i].orig);
+    }
+    return READ_ONCE(ksu_syscall_table[nr]);
+}
+
+#ifdef CONFIG_KSU_LEGACY_4_19
+static unsigned long ksu_decode_bl_target(unsigned long pc, u32 insn)
+{
+    s64 off;
+
+    if ((insn & 0xfc000000) != 0x94000000)
+        return 0;
+    off = sign_extend64(insn & 0x03ffffff, 25) << 2;
+    return pc + off;
+}
+
+static syscall_fn_t *ksu_legacy_find_syscall_table(void)
+{
+    unsigned long entry, handler = 0;
+    u32 insn[32];
+    int i;
+
+    entry = find_kernel_symbol_exact("el0_svc");
+    if (!entry || probe_kernel_read(insn, (void *)entry, 4 * sizeof(u32)))
+        return NULL;
+
+    for (i = 0; i < 4; i++) {
+        handler = ksu_decode_bl_target(entry + i * sizeof(u32), insn[i]);
+        if (handler)
+            break;
+    }
+    if (!handler || probe_kernel_read(insn, (void *)handler, sizeof(insn)))
+        return NULL;
+
+    for (i = 0; i < ARRAY_SIZE(insn) - 1; i++) {
+        u32 adrp = insn[i];
+        u32 add = insn[i + 1];
+        s64 page_off;
+        unsigned long page, imm;
+
+        if ((adrp & 0x9f00001f) != 0x90000002)
+            continue;
+        if ((add & 0xffc003ff) != 0x91000042)
+            continue;
+
+        page_off = sign_extend64((((adrp >> 5) & 0x7ffff) << 2) |
+                                 ((adrp >> 29) & 3), 20) << 12;
+        page = ((handler + i * sizeof(u32)) & PAGE_MASK) + page_off;
+        imm = (add >> 10) & 0xfff;
+        if (add & BIT(22))
+            imm <<= 12;
+        pr_info("legacy decoded sys_call_table from el0_svc handler: 0x%lx\n",
+                page + imm);
+        return (syscall_fn_t *)(page + imm);
+    }
+
+    return NULL;
+}
+
+static long __nocfi ksu_legacy_setresuid(const struct pt_regs *regs)
+{
+    return ksu_legacy_dispatch(__NR_setresuid, ksu_hook_setresuid, regs);
+}
+
+static long __nocfi ksu_legacy_execve(const struct pt_regs *regs)
+{
+    return ksu_legacy_dispatch(__NR_execve, ksu_hook_execve, regs);
+}
+
+static long __nocfi ksu_legacy_newfstatat(const struct pt_regs *regs)
+{
+    return ksu_legacy_dispatch(__NR_newfstatat, ksu_hook_newfstatat, regs);
+}
+
+static long __nocfi ksu_legacy_faccessat(const struct pt_regs *regs)
+{
+    return ksu_legacy_dispatch(__NR_faccessat, ksu_hook_faccessat, regs);
+}
+
+static syscall_fn_t ksu_legacy_orig_reboot;
+
+static long __nocfi ksu_legacy_reboot(const struct pt_regs *regs)
+{
+    long ret;
+
+    atomic_inc(&ksu_legacy_active);
+    smp_mb__after_atomic();
+    if (unlikely(READ_ONCE(ksu_legacy_exiting)))
+        ret = ksu_legacy_orig_reboot(regs);
+    else if (ksu_handle_reboot_supercall_direct(regs))
+        ret = 0;
+    else
+        ret = ksu_legacy_orig_reboot(regs);
+    if (atomic_dec_and_test(&ksu_legacy_active))
+        wake_up_all(&ksu_legacy_drain_wait);
+    return ret;
+}
+
+static syscall_fn_t ksu_legacy_adapter(int nr)
+{
+    switch (nr) {
+    case __NR_setresuid:
+        return ksu_legacy_setresuid;
+    case __NR_execve:
+        return ksu_legacy_execve;
+    case __NR_newfstatat:
+        return ksu_legacy_newfstatat;
+    case __NR_faccessat:
+        return ksu_legacy_faccessat;
+    default:
+        return NULL;
+    }
+}
+#endif
 
 static int patch_syscall_table(int nr, syscall_fn_t fn)
 {
@@ -63,6 +222,11 @@ void ksu_syscall_table_hook(int nr, syscall_fn_t fn, syscall_fn_t *old)
     if (old)
         *old = orig;
 
+    if (patch_syscall_table(nr, fn)) {
+        mutex_unlock(&hooked_entries_lock);
+        return;
+    }
+
     // Record for later restoration
     int i;
     bool found = false;
@@ -81,8 +245,6 @@ void ksu_syscall_table_hook(int nr, syscall_fn_t fn, syscall_fn_t *old)
             pr_warn("hooked_entries full, cannot track syscall %d for restoration\n", nr);
         }
     }
-
-    patch_syscall_table(nr, fn);
 
     mutex_unlock(&hooked_entries_lock);
 }
@@ -176,6 +338,16 @@ int ksu_register_syscall_hook(int nr, ksu_syscall_hook_fn fn)
         return -EEXIST;
     }
     WRITE_ONCE(syscall_hooks[nr], fn);
+#ifdef CONFIG_KSU_LEGACY_4_19
+    {
+        syscall_fn_t adapter = ksu_legacy_adapter(nr);
+        if (!adapter) {
+            WRITE_ONCE(syscall_hooks[nr], NULL);
+            return -EINVAL;
+        }
+        ksu_syscall_table_hook(nr, adapter, NULL);
+    }
+#endif
     pr_info("registered syscall hook for nr=%d\n", nr);
     return 0;
 }
@@ -186,6 +358,9 @@ void ksu_unregister_syscall_hook(int nr)
 {
     if (nr < 0 || nr >= __NR_syscalls)
         return;
+#ifdef CONFIG_KSU_LEGACY_4_19
+    ksu_syscall_table_unhook(nr);
+#endif
     WRITE_ONCE(syscall_hooks[nr], NULL);
     pr_info("unregistered syscall hook for nr=%d\n", nr);
 }
@@ -199,16 +374,27 @@ bool ksu_has_syscall_hook(int nr)
 
 void __init ksu_syscall_hook_init(void)
 {
+#ifndef CONFIG_KSU_LEGACY_4_19
     int ni_slot;
+#endif
 
     memset(syscall_hooks, 0, sizeof(syscall_hooks));
+#ifdef CONFIG_KSU_LEGACY_4_19
+    WRITE_ONCE(ksu_legacy_exiting, false);
+    atomic_set(&ksu_legacy_active, 0);
+#endif
 
     ksu_syscall_table = (syscall_fn_t *)ksu_resolve_symbol_for_functable_hook("sys_call_table");
+#ifdef CONFIG_KSU_LEGACY_4_19
+    if (!ksu_syscall_table)
+        ksu_syscall_table = ksu_legacy_find_syscall_table();
+#endif
     pr_info("sys_call_table=0x%lx", (unsigned long)ksu_syscall_table);
 
     if (!ksu_syscall_table)
         return;
 
+#ifndef CONFIG_KSU_LEGACY_4_19
     // Find one ni_syscall slot for the dispatcher
     if (ksu_find_ni_syscall_slots(&ni_slot, 1) < 1) {
         pr_err("failed to find ni_syscall slot for dispatcher\n");
@@ -218,6 +404,11 @@ void __init ksu_syscall_hook_init(void)
     ksu_dispatcher_nr = ni_slot;
     ksu_syscall_table_hook(ksu_dispatcher_nr, (syscall_fn_t)ksu_syscall_dispatcher, NULL);
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
+#else
+    pr_info("legacy 4.19 direct syscall table mode\n");
+    ksu_syscall_table_hook(__NR_reboot, ksu_legacy_reboot,
+                           &ksu_legacy_orig_reboot);
+#endif
 }
 
 void __exit ksu_syscall_hook_exit(void)
@@ -241,6 +432,11 @@ void __exit ksu_syscall_hook_exit(void)
     }
     hooked_count = 0;
     mutex_unlock(&hooked_entries_lock);
+
+#ifdef CONFIG_KSU_LEGACY_4_19
+    wait_event(ksu_legacy_drain_wait, atomic_read(&ksu_legacy_active) == 0);
+    pr_info("legacy syscall adapters drained\n");
+#endif
 
 clear_state:
     // Now that the syscall table is restored, clear internal state.

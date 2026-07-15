@@ -1,6 +1,8 @@
 kernelsu-objs := core/init.o
 
+ifneq ($(CONFIG_KSU_LEGACY_4_19),y)
 kernelsu-objs += feature/kernel_umount.o
+endif
 kernelsu-objs += feature/sulog.o
 kernelsu-objs += feature/sucompat.o
 
@@ -8,7 +10,9 @@ kernelsu-objs += hook/lsm_hook.o
 kernelsu-objs += hook/setuid_hook.o
 kernelsu-objs += hook/syscall_event_bridge.o
 kernelsu-objs += hook/syscall_hook_manager.o
+ifneq ($(CONFIG_KSU_LEGACY_4_19),y)
 kernelsu-objs += hook/tp_marker.o
+endif
 ifeq ($(CONFIG_ARM64),y)
 kernelsu-objs += hook/arm64/patch_memory.o
 kernelsu-objs += hook/arm64/syscall_hook.o
@@ -17,10 +21,16 @@ kernelsu-objs += hook/x86_64/patch_memory.o
 kernelsu-objs += hook/x86_64/syscall_hook.o
 endif
 
+ifneq ($(CONFIG_KSU_LEGACY_4_19),y)
 kernelsu-objs += infra/file_wrapper.o
+endif
 kernelsu-objs += infra/event_queue.o
+ifneq ($(CONFIG_KSU_LEGACY_4_19),y)
 kernelsu-objs += infra/seccomp_cache.o
+endif
+ifneq ($(CONFIG_KSU_LEGACY_4_19),y)
 kernelsu-objs += infra/su_mount_ns.o
+endif
 kernelsu-objs += infra/symbol_resolver.o
 
 ifneq ($(CONFIG_KSU_DISABLE_MANAGER),y)
@@ -47,11 +57,17 @@ kernelsu-objs += supercall/dispatch.o
 kernelsu-objs += supercall/perm.o
 kernelsu-objs += supercall/supercall.o
 
+ifneq ($(CONFIG_KSU_LEGACY_4_19),y)
 kernelsu-objs += feature/adb_root.o
+endif
 
+ifneq ($(CONFIG_KSU_LEGACY_4_19),y)
 kernelsu-objs += feature/selinux_hide.o
+endif
 
+ifneq ($(CONFIG_KSU_LEGACY_4_19),y)
 kernelsu-objs += feature/uts_spoof.o
+endif
 
 ifdef KBUILD_EXTMOD
 ifeq ($(CONFIG_KSU_DISABLE_MANAGER),y)
@@ -63,11 +79,16 @@ endif
 ifeq ($(CONFIG_KSU_DEBUG),y)
 ccflags-y += -DCONFIG_KSU_DEBUG=1
 endif
+ifeq ($(CONFIG_KSU_LEGACY_4_19),y)
+ccflags-y += -DCONFIG_KSU_LEGACY_4_19=1
+endif
 endif
 
+ifneq ($(CONFIG_KSU_LEGACY_4_19),y)
 obj-$(CONFIG_KPM) += kpm/compact.o
 obj-$(CONFIG_KPM) += kpm/kpm.o
 obj-$(CONFIG_KPM) += kpm/super_access.o
+endif
 
 ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include
 ccflags-y += -I$(objtree)/security/selinux -include $(srctree)/include/uapi/asm-generic/errno.h
@@ -79,6 +100,9 @@ KSU_KERNEL_DIR := $(src)
 endif
 
 ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include
+ifeq ($(CONFIG_KSU_LEGACY_4_19),y)
+ccflags-y += -include $(KSU_KERNEL_DIR)/include/legacy_4_19_config.h
+endif
 
 obj-$(CONFIG_KSU) += kernelsu.o
 

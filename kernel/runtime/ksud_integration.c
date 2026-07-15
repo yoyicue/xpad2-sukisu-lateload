@@ -20,6 +20,12 @@
 #include <linux/uio.h>
 #include <linux/stat.h>
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+#define strncpy_from_user_nofault strncpy_from_user
+#define copy_from_user_nofault copy_from_user
+#define copy_to_user_nofault copy_to_user
+#endif
+
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
@@ -75,14 +81,14 @@ static const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
     if (unlikely(argv.is_compat)) {
         compat_uptr_t compat;
 
-        if (get_user(compat, argv.ptr.compat + nr))
+        if (copy_from_user(&compat, argv.ptr.compat + nr, sizeof(compat)))
             return ERR_PTR(-EFAULT);
 
         return compat_ptr(compat);
     }
 #endif
 
-    if (get_user(native, argv.ptr.native + nr))
+    if (copy_from_user(&native, argv.ptr.native + nr, sizeof(native)))
         return ERR_PTR(-EFAULT);
 
     return native;
@@ -609,10 +615,14 @@ static struct kprobe input_event_kp = {
     .symbol_name = "input_event",
     .pre_handler = input_handle_event_handler_pre,
 };
+static bool input_event_kp_registered;
 
 static void do_stop_input_hook(struct work_struct *work)
 {
-    unregister_kprobe(&input_event_kp);
+    if (input_event_kp_registered) {
+        unregister_kprobe(&input_event_kp);
+        input_event_kp_registered = false;
+    }
 }
 
 static void stop_init_rc_hook()
@@ -629,8 +639,16 @@ void ksu_stop_input_hook_runtime(void)
         return;
     }
     input_hook_stopped = true;
+#ifdef CONFIG_KSU_LEGACY_4_19
+    if (input_event_kp_registered) {
+        unregister_kprobe(&input_event_kp);
+        input_event_kp_registered = false;
+    }
+    pr_info("unregister input kprobe directly\n");
+#else
     bool ret = schedule_work(&stop_input_hook_work);
     pr_info("unregister input kprobe: %d!\n", ret);
+#endif
 }
 
 // ksud: module support
@@ -642,6 +660,7 @@ void __init ksu_ksud_init()
     ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
 
     ret = register_kprobe(&input_event_kp);
+    input_event_kp_registered = ret == 0;
     pr_info("ksud: input_event_kp: %d\n", ret);
 
     INIT_WORK(&stop_input_hook_work, do_stop_input_hook);
@@ -652,7 +671,10 @@ void __exit ksu_ksud_exit()
     // TODO:
     // this should be done before unregister vfs_read_kp
     // stop_init_rc_hook();
-    unregister_kprobe(&input_event_kp);
+    if (input_event_kp_registered) {
+        unregister_kprobe(&input_event_kp);
+        input_event_kp_registered = false;
+    }
 
     if (module_rc_buf) {
         free_module_rc();

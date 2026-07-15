@@ -5,6 +5,23 @@
 #include <linux/sched.h>
 #include <linux/thread_info.h>
 
+#ifdef CONFIG_KSU_LEGACY_4_19
+static inline void ksu_mark_all_process(void) {}
+static inline void ksu_unmark_all_process(void) {}
+static inline void ksu_mark_running_process(void) {}
+static inline int ksu_get_task_mark(pid_t pid) { return 0; }
+static inline int ksu_set_task_mark(pid_t pid, bool mark) { return -EOPNOTSUPP; }
+static inline void ksu_set_task_tracepoint_flag(struct task_struct *t) {}
+static inline void ksu_clear_task_tracepoint_flag(struct task_struct *t) {}
+static inline void ksu_clear_task_tracepoint_flag_if_needed(struct task_struct *t) {}
+static inline void ksu_mark_running_process_locked(void) {}
+static inline int ksu_tp_marker_reg_count(void) { return 0; }
+static inline void ksu_tp_marker_lock(unsigned long *flags) {}
+static inline void ksu_tp_marker_unlock(unsigned long *flags) {}
+static inline void ksu_tp_marker_inc_reg_count(void) {}
+static inline void ksu_tp_marker_dec_reg_count(void) {}
+#else
+
 // Process marking for tracepoint
 void ksu_mark_all_process(void);
 void ksu_unmark_all_process(void);
@@ -43,5 +60,7 @@ void ksu_tp_marker_lock(unsigned long *flags);
 void ksu_tp_marker_unlock(unsigned long *flags);
 void ksu_tp_marker_inc_reg_count(void);
 void ksu_tp_marker_dec_reg_count(void);
+
+#endif
 
 #endif

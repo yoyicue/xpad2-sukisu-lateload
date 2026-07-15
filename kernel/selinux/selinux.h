@@ -5,6 +5,8 @@
 #include <linux/version.h>
 #include <linux/cred.h>
 
+struct selinux_state;
+
 #define KERNEL_SU_DOMAIN "ksu"
 #define KERNEL_SU_FILE "ksu_file"
 
@@ -30,6 +32,10 @@ bool is_zygote(const struct cred *cred);
 bool is_init(const struct cred *cred);
 
 void apply_kernelsu_rules();
+
+#ifdef CONFIG_KSU_LEGACY_4_19
+struct selinux_state *ksu_get_selinux_state(void);
+#endif
 
 int handle_sepolicy(void __user *user_data, u64 data_len);
 
