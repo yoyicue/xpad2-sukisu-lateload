@@ -34,9 +34,9 @@
 - 清除 IonStack 临时 Root 后，SukiSU 继续工作且 SELinux 为 Enforcing；
 - Boot ID 在整个加载和验证过程中保持不变。
 
-功能路径的第二个独立 boot 验证记录见 `PROGRESS.md`。真机验证完成后仅将 Manager
-展示用 hook 标签缩短为 `Direct Syscall Table (4.19)`，功能代码未再改动；发布制品已
-重新通过编译、ABI、符号和 Rust 门禁。
+发布制品已在新的独立 boot 真机验证：Manager 展示完整的
+`Direct Syscall Table (4.19)`，模块 `srcversion`、驱动版本和 Release 哈希均与
+`v0.1.0` 一致。完整记录见 `PROGRESS.md`。
 
 ## 制品
 

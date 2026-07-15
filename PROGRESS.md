@@ -121,6 +121,26 @@ Boot ID：`63a4bd76-54a5-465b-8de6-b55d3935d359`。IonStack 临时 Root 在第
 重新构建并通过 141/141 运行时符号、精确 vermagic、fmt、check、clippy 和 release
 build 门禁，没有在同一 boot 热替换。
 
+## v0.1.0 发布制品真机复验
+
+最终 Release 制品在普通重启后的新 Boot ID
+`2e8767d3-962b-4f0c-856b-36ba5d74f100` 完成独立验证。重启后确认旧模块不存在，
+SELinux Enforcing；`xpad2 root` 在第 1/6 轮成功，PFN 证据为
+`free=1 alloc=1 matched=1`，两个 capture worker 成功且 fops 恢复。
+
+设备侧加载前校验：
+
+```text
+5835dbed566e9711fab02c3b729e6dce495b996481af53c474f2be4816e7fd81  sukisu-xpad2-4.19.191.ko
+74379a3c1a556448762db00d8e1316b31a4cf56a1eb1b8accd8447a1e3859bd8  ksud-sukisu-xpad2
+```
+
+加载后的模块 `srcversion` 为 `93DD648468EDC27A2E4CCA6`；驱动版本 `40796`、
+flags/features `0x5`、LKM/late-load 均为 true，Manager appId 为 `10221`。
+`debug su` 返回 `uid=0` 和 `u:r:ksu:s0`。清理 IonStack 临时 Root 后 SELinux 恢复
+Enforcing、临时 socket/进程消失，SukiSU Root 继续工作且 Boot ID 未变化。Manager
+首页显示完整的 `Direct Syscall Table (4.19)`。
+
 ## 生命周期约束
 
 开发历史不作为在线卸载授权。当前产品策略固定为：同一 boot 不卸载、不替换；任何升级

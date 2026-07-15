@@ -5,7 +5,9 @@ SukiSU Ultra late-load Release。基于官方 SukiSU Ultra v4.1.3，驱动和 Ma
 版本码均为 40796；无需修改 boot image，普通重启后模块自然消失。
 
 已在物理 XPad2 验证 late-load、官方 Manager 授权、`u:r:ksu:s0` Root、临时 Root
-清理和 SELinux Enforcing。发布模块通过精确 vermagic 和 141/141 运行时符号门禁。
+清理和 SELinux Enforcing。v0.1.0 的精确发布制品已在独立 boot 复验，模块
+`srcversion=93DD648468EDC27A2E4CCA6`；发布模块通过精确 vermagic 和 141/141
+运行时符号门禁。
 
 Release 包含：
 
